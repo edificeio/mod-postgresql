@@ -57,7 +57,7 @@ compileTestJava {
 dependencies {
   compileOnly "io.vertx:vertx-core:$vertxVersion"
   compile "fr.wseduc:web-utils:$webutilsVersion"
-  compile "com.zaxxer:HikariCP-java6:$cpVersion"
+  compile "com.zaxxer:HikariCP:$cpVersion"
   compile "org.postgresql:postgresql:$postgresDriverVersion"
   compile "joda-time:joda-time:$jodaTimeVersion"
 }
