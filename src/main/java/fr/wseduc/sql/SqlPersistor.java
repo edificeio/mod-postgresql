@@ -47,6 +47,12 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 		final String url = config.getString("url", "jdbc:postgresql://localhost:5432/test");
 		final String urlSlave = config.getString("url-slave");
 
+		try {
+			Class.forName("org.postgresql.Driver");
+		} catch (ClassNotFoundException e) {
+			logger.error("Failed to explicitely load the postgresql driver", e);
+		}
+
 		HikariConfig conf = new HikariConfig();
 		conf.setJdbcUrl(url);
 		conf.setUsername(config.getString("username", "postgres"));
