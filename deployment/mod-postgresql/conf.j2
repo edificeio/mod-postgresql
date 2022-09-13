@@ -28,3 +28,35 @@
         "pool_size": {{postgresPoolSize | default(50)}}
     }
 }
+{% if pgAdminUser is defined %}
+,{
+    "name": "{{ modPostgresVersion }}",
+    "priority": 5,
+    "waitDeploy" : true,
+    "worker": true,
+    "multi-threaded": true,
+    "config": {
+        "address": "sql.persistor.admin",
+        {% if ipPostgresMaster is defined %}
+        "url": "jdbc:postgresql://{{ ipPostgresMaster }}:5433/{{dbName}}?stringtype=unspecified&loadBalanceHosts=true",
+            {% if ipPostgresSlave1 is defined %}
+        "url-slave": "jdbc:postgresql://{{ ipPostgresSlave1 }}:5433/{{dbName}}?stringtype=unspecified&loadBalanceHosts=true",
+            {% elif ipPostgresSlave2 is defined %}
+        "url-slave": "jdbc:postgresql://{{ ipPostgresSlave2 }}:5433/{{dbName}}?stringtype=unspecified&loadBalanceHosts=true",
+            {% endif %}
+        {% else %}
+            {% if ipPostgres is defined %}
+        "url": "jdbc:postgresql://{% for ip in ipPostgres %}{{ip}}:5432{% if not(loop.last) %},{% endif %}{% endfor %}/{{dbName}}?stringtype=unspecified&loadBalanceHosts=true",
+                {% if ipPostgresReverse is defined %}
+        "url-slave": "jdbc:postgresql://{% for ip in ipPostgres|reverse %}{{ip}}:5432{% if not(loop.last) %},{% endif %}{% endfor %}/{{dbName}}?stringtype=unspecified",
+                {% endif %}
+            {% else %}
+        "url": "jdbc:postgresql://{% for ip in dbip %}{% if not(ha) or loop.index0 != 1 %}{{ip}}:5432{% if not(loop.last) %},{% endif %}{% endif %}{% endfor %}/{{dbName}}?stringtype=unspecified{% if ha %}&loadBalanceHosts=true{% endif %}",
+            {% endif %}
+        {% endif %}
+        "username": "{{ pgAdminUser }}",
+        "password": "{{ pgAdminPwd }}",
+        "pool_size": {{pgAdminPoolSize | default(10)}}
+    }
+}
+{% endif %}
