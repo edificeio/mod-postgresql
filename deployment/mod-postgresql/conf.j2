@@ -56,7 +56,7 @@
         {% endif %}
         "username": "{{ pgAdminUser }}",
         "password": "{{ pgAdminPwd }}",
-        "pool_size": {{pgAdminPoolSize | default(10)}}
+        "pool_size": {{pgAdminPoolSize | default(1)}}
     }
 }
 {% endif %}
