@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.edifice</groupId>
+    <artifactId>app-parent</artifactId>
+    <version>1.0</version>
+  </parent>
+
+  <groupId>fr.wseduc</groupId>
+  <artifactId>mod-postgresql</artifactId>
+  <version>2.0-b2school-SNAPSHOT</version>
+
+  <properties>
+    <web-utils.version>3.0-b2school-SNAPSHOT</web-utils.version>
+    <jacksonDatabindVersion>2.15.2</jacksonDatabindVersion>
+    <hikari.version>2.4.2</hikari.version>
+    <postgres-driver.version>42.2.26</postgres-driver.version>
+    <joda-time.version>2.7</joda-time.version>
+  </properties>
+
+  <scm>
+    <connection>scm:git:https://github.com/opendigitaleducation/mod-postgresql.git</connection>
+    <developerConnection>scm:git:https://github.com/opendigitaleducation/mod-postgresql.git</developerConnection>
+    <url>https://github.com/opendigitaleducation/mod-postgresql</url>
+  </scm>
+
+  <repositories>
+    <repository>
+      <id>ode</id>
+      <name>ODE Repository</name>
+      <url>https://maven.opendigitaleducation.com/nexus/content/groups/public</url>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.vertx</groupId>
+      <artifactId>vertx-core</artifactId>
+      <version>${vertxVersion}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>fr.wseduc</groupId>
+      <artifactId>web-utils</artifactId>
+      <version>${web-utils.version}</version>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jacksonDatabindVersion}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>HikariCP</artifactId>
+      <version>${hikari.version}</version>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>joda-time</groupId>
+      <artifactId>joda-time</artifactId>
+      <version>${joda-time.version}</version>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>${postgres-driver.version}</version>
+      <scope>compile</scope>
+    </dependency>
+      <dependency>
+          <groupId>joda-time</groupId>
+          <artifactId>joda-time</artifactId>
+          <version>2.12.5</version>
+          <scope>compile</scope>
+      </dependency>
+  </dependencies>
+</project>

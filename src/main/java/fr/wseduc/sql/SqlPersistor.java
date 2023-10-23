@@ -19,7 +19,10 @@ package fr.wseduc.sql;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.vertx.core.Handler;
+import io.vertx.core.Promise;
 import io.vertx.core.eventbus.Message;
+import io.vertx.core.impl.logging.Logger;
+import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import org.vertx.java.busmods.BusModBase;
@@ -41,8 +44,9 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			"|insert_users_members|insert_group_members|function_|reset_time_slots|delete_trombinoscope_failure|delete_incident)",
 			Pattern.CASE_INSENSITIVE);
 
+
 	@Override
-	public void start() {
+	public void start(final Promise<Void> startPromise) {
 		super.start();
 		final String url = config.getString("url", "jdbc:postgresql://localhost:5432/test");
 		final String urlSlave = config.getString("url-slave");
@@ -51,6 +55,7 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			Class.forName("org.postgresql.Driver");
 		} catch (ClassNotFoundException e) {
 			logger.error("Failed to explicitely load the postgresql driver", e);
+			startPromise.tryFail(e);
 		}
 
 		HikariConfig conf = new HikariConfig();
@@ -78,6 +83,7 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 		}
 
 		vertx.eventBus().consumer(config.getString("address", "sql.persistor"), this);
+		startPromise.tryComplete();
 	}
 
 	@Override
@@ -228,25 +234,30 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 				if (!(s instanceof JsonObject)) continue;
 				JsonObject json = (JsonObject) s;
 				String action = json.getString("action", "");
-				switch (action) {
-					case "insert":
-						results.add(raw(insertQuery(json), connection));
-						break;
-					case "select":
-						results.add(raw(selectQuery(json), connection));
-						break;
-					case "raw":
-						results.add(raw(json, connection));
-						break;
-					case "prepared":
-						results.add(prepared(json, connection));
-						break;
-					case "upsert":
-						results.add(raw(upsertQuery(json), connection));
-						break;
-					default:
-						connection.rollback();
-						throw new IllegalArgumentException("invalid.action");
+				try {
+					switch (action) {
+						case "insert":
+							results.add(raw(insertQuery(json), connection));
+							break;
+						case "select":
+							results.add(raw(selectQuery(json), connection));
+							break;
+						case "raw":
+							results.add(raw(json, connection));
+							break;
+						case "prepared":
+							results.add(prepared(json, connection));
+							break;
+						case "upsert":
+							results.add(raw(upsertQuery(json), connection));
+							break;
+						default:
+							connection.rollback();
+							throw new IllegalArgumentException("invalid.action");
+					}
+				} catch (Exception e) {
+					logger.error("An error occurred while executing " + json.encodePrettily(), e);
+					throw e;
 				}
 			}
 			connection.commit();
@@ -513,7 +524,7 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 		int numColumns = rsmd.getColumnCount();
 
 		while(rs.next()) {
-			JsonArray row = new fr.wseduc.webutils.collections.JsonArray();
+			JsonArray row = new JsonArray();
 			results.add(row);
 			for (int i = 1; i < numColumns + 1; i++) {
 				switch (rsmd.getColumnType(i)) {
