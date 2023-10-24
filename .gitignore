@@ -21,3 +21,5 @@ test-tmp
 *.class
 mods
 classes
+gradlew*
+gradle
