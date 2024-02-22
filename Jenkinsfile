@@ -2,6 +2,7 @@
 
 pipeline {
   agent any
+    stages {
       stage("Initialization") {
         when {
           environment name: 'RENAME_BUILDS', value: 'true'
@@ -13,7 +14,6 @@ pipeline {
           }
         }
       }
-    stages {
       stage('Build') {
         steps {
           checkout scm
