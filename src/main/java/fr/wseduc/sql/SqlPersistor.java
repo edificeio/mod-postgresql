@@ -96,29 +96,32 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 
 	@Override
 	public void handle(Message<JsonObject> message) {
-		String action = message.body().getString("action", "");
-		switch (action) {
-			case "select" :
-				doSelect(message);
-				break;
-			case "insert" :
-				doInsert(message);
-				break;
-			case "prepared" :
-				doPrepared(message);
-				break;
-			case "transaction" :
-				doTransaction(message);
-				break;
-			case "raw" :
-				doRaw(message);
-				break;
-			case "upsert" :
-				doUpsert(message);
-				break;
-			default :
-				sendError(message, "invalid.action");
-		}
+		vertx.executeBlocking(() -> {
+			String action = message.body().getString("action", "");
+			switch (action) {
+				case "select" :
+					doSelect(message);
+					break;
+				case "insert" :
+					doInsert(message);
+					break;
+				case "prepared" :
+					doPrepared(message);
+					break;
+				case "transaction" :
+					doTransaction(message);
+					break;
+				case "raw" :
+					doRaw(message);
+					break;
+				case "upsert" :
+					doUpsert(message);
+					break;
+				default :
+					sendError(message, "invalid.action");
+			}
+			return null;
+		});
 	}
 
 	private void doRaw(Message<JsonObject> message) {
