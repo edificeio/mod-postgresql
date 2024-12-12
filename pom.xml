@@ -17,7 +17,7 @@
     <web-utils.version>3.0-SNAPSHOT</web-utils.version>
     <jacksonDatabindVersion>2.15.2</jacksonDatabindVersion>
     <hikari.version>2.4.2</hikari.version>
-    <postgres-driver.version>42.2.26</postgres-driver.version>
+    <postgres-driver.version>42.2.28</postgres-driver.version>
     <joda-time.version>2.7</joda-time.version>
   </properties>
 
