@@ -121,7 +121,7 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 					sendError(message, "invalid.action");
 			}
 			return null;
-		});
+		}, false);
 	}
 
 	private void doRaw(Message<JsonObject> message) {
