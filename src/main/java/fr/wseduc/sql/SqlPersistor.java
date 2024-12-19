@@ -606,8 +606,11 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			// Process each column in the row
 			int i = 0;
 			for (ColumnDescriptor columnDescriptor : columnDescriptors) {
-				final String columnName = columnDescriptor.name();
 				Object value = row.getValue(i);
+				if(value == null) {
+					rowJson.addNull();
+					continue;
+				}
 				switch (columnDescriptor.jdbcType()) {
 					case NULL:
 						rowJson.addNull();
