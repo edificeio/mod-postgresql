@@ -78,5 +78,29 @@
           <version>2.12.5</version>
           <scope>compile</scope>
       </dependency>
+    <dependency>
+      <groupId>fr.wseduc</groupId>
+      <artifactId>web-utils</artifactId>
+      <version>3.0-develop-b2school-SNAPSHOT</version>
+      <scope>compile</scope>
+    </dependency>
+      <dependency>
+          <groupId>fr.wseduc</groupId>
+          <artifactId>web-utils</artifactId>
+          <version>3.0-b2school-SNAPSHOT</version>
+          <scope>compile</scope>
+      </dependency>
+      <dependency>
+          <groupId>io.micrometer</groupId>
+          <artifactId>micrometer-core</artifactId>
+          <version>1.14.1</version>
+          <scope>compile</scope>
+      </dependency>
+    <dependency>
+      <groupId>io.vertx</groupId>
+      <artifactId>vertx-micrometer-metrics</artifactId>
+      <version>4.5.5</version>
+      <scope>compile</scope>
+    </dependency>
   </dependencies>
 </project>

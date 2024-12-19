@@ -18,6 +18,8 @@ package fr.wseduc.sql;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
 import io.vertx.core.eventbus.Message;
@@ -25,17 +27,25 @@ import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
+import io.vertx.micrometer.backends.BackendRegistries;
 import org.vertx.java.busmods.BusModBase;
 
 import java.sql.*;
 import java.text.SimpleDateFormat;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static fr.wseduc.sql.TimestampEncoderDecoder.encode;
 import static fr.wseduc.webutils.Utils.isNotEmpty;
+import static java.lang.System.currentTimeMillis;
+
+import io.micrometer.core.instrument.Counter;
 
 public class SqlPersistor extends BusModBase implements Handler<Message<JsonObject>> {
+
+	private static final Logger logger = LoggerFactory.getLogger(SqlPersistor.class);
 
 	private HikariDataSource ds;
 	private HikariDataSource dsSlave;
@@ -44,6 +54,9 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			"|insert_users_members|insert_group_members|function_|reset_time_slots|delete_trombinoscope_failure|delete_incident)",
 			Pattern.CASE_INSENSITIVE);
 
+	private Counter nbRequestsCounter;
+	private Timer delayInBlocking;
+	private Timer executionTime;
 
 	@Override
 	public void start(final Promise<Void> startPromise) {
@@ -84,6 +97,24 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 
 		vertx.eventBus().consumer(config.getString("address", "sql.persistor"), this);
 		startPromise.tryComplete();
+
+		final MeterRegistry registry = BackendRegistries.getDefaultNow();
+		if (registry == null) {
+			throw new IllegalStateException("micrometer.registries.empty");
+		}
+		nbRequestsCounter = Counter.builder("pg.persistor.queries")
+			.description("number of queries executed by pg persistor")
+			.register(registry);
+		delayInBlocking = Timer.builder("pg.persistor.delay.blocking")
+			.description("blocking between invocation and execution")
+			.publishPercentileHistogram()
+			.maximumExpectedValue(Duration.ofSeconds(3L))
+			.register(registry);
+		executionTime = Timer.builder("pg.persistor.exec.time")
+			.description("blocking between invocation and execution")
+			.publishPercentileHistogram()
+			.maximumExpectedValue(Duration.ofSeconds(1L))
+			.register(registry);
 	}
 
 	@Override
@@ -96,8 +127,13 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 
 	@Override
 	public void handle(Message<JsonObject> message) {
+		final long start = currentTimeMillis();
+		nbRequestsCounter.increment();
 		vertx.executeBlocking(() -> {
+			delayInBlocking.record(currentTimeMillis() - start, TimeUnit.MILLISECONDS);
+			logger.info("Executing on " + Thread.currentThread().getName());
 			String action = message.body().getString("action", "");
+			final long startQ = currentTimeMillis();
 			switch (action) {
 				case "select" :
 					doSelect(message);
@@ -120,6 +156,7 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 				default :
 					sendError(message, "invalid.action");
 			}
+			executionTime.record(currentTimeMillis() - startQ, TimeUnit.MILLISECONDS);
 			return null;
 		}, false);
 	}
