@@ -16,10 +16,9 @@
 
 package fr.wseduc.sql;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
 import io.vertx.core.eventbus.Message;
@@ -28,11 +27,18 @@ import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.micrometer.backends.BackendRegistries;
+import io.vertx.pgclient.PgConnectOptions;
+import io.vertx.pgclient.SslMode;
+import io.vertx.sqlclient.*;
+import io.vertx.sqlclient.desc.ColumnDescriptor;
+import org.apache.commons.lang3.tuple.Pair;
 import org.vertx.java.busmods.BusModBase;
 
 import java.sql.*;
+import java.sql.PreparedStatement;
 import java.text.SimpleDateFormat;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -46,82 +52,88 @@ import io.micrometer.core.instrument.Counter;
 public class SqlPersistor extends BusModBase implements Handler<Message<JsonObject>> {
 
 	private static final Logger logger = LoggerFactory.getLogger(SqlPersistor.class);
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(SqlPersistor.class);
 
-	private HikariDataSource ds;
-	private HikariDataSource dsSlave;
 	private Pattern writingClausesPattern = Pattern.compile(
 			"(update\\s+|create\\s+|merge_|delete\\s+|remove\\s+|insert\\s+|alter\\s+|add\\s+|drop\\s+|constraint\\s+|\\s+nextval" +
 			"|insert_users_members|insert_group_members|function_|reset_time_slots|delete_trombinoscope_failure|delete_incident)",
 			Pattern.CASE_INSENSITIVE);
 
 	private Counter nbRequestsCounter;
-	private Timer delayInBlocking;
-	private Timer executionTime;
+  private Timer executionTime;
+
+	private Pool primaryPool;
+	private Pool secondaryPool;
 
 	@Override
-	public void start(final Promise<Void> startPromise) {
-		super.start();
-		final String url = config.getString("url", "jdbc:postgresql://localhost:5432/test");
-		final String urlSlave = config.getString("url-slave");
-
+	public void start(final Promise<Void> startPromise) throws Exception {
+		logger.info("Starting mod postgres");
 		try {
-			Class.forName("org.postgresql.Driver");
-		} catch (ClassNotFoundException e) {
-			logger.error("Failed to explicitely load the postgresql driver", e);
-			startPromise.tryFail(e);
+			super.start(startPromise);
+			String primaryUrl = config().getString("url", "postgresql://localhost:5432/test").replaceFirst("^jdbc:", "");
+			String secondaryUrl = config().getString("url-slave").replaceFirst("^jdbc:", "");
+			String username = config().getString("username", "postgres");
+			String password = config().getString("password", "");
+			int maxPoolSize = config().getInteger("pool_size", 10);
+
+			// Extract primary database connection options
+			PgConnectOptions primaryConnectOptions = PgConnectOptions.fromUri(primaryUrl)
+				.setUser(username)
+				.setPassword(password)
+				//.addProperty("stringtype", "unspecified") // Query parameter
+				.setSslMode(SslMode.REQUIRE); ;
+
+			// Configure connection pool
+			PoolOptions primaryPoolOptions = new PoolOptions()
+				.setMaxSize(maxPoolSize);
+
+			// Initialize primary pool
+			primaryPool = Pool.pool(vertx, primaryConnectOptions, primaryPoolOptions);
+
+			if (secondaryUrl != null && !secondaryUrl.isEmpty()) {
+				// Extract secondary database connection options
+				PgConnectOptions secondaryConnectOptions = PgConnectOptions.fromUri(secondaryUrl)
+					.setUser(username)
+					.setPassword(password)
+					//.addProperty("stringtype", "unspecified") // Query parameter
+					.setSslMode(SslMode.REQUIRE); ;
+
+				// Configure secondary pool
+				PoolOptions secondaryPoolOptions = new PoolOptions()
+					.setMaxSize(maxPoolSize);
+
+				// Initialize secondary pool
+				secondaryPool = Pool.pool(vertx, secondaryConnectOptions, secondaryPoolOptions);
+			}
+
+			vertx.eventBus().consumer(config.getString("address", "sql.persistor"), this);
+			startPromise.tryComplete();
+
+			final MeterRegistry registry = BackendRegistries.getDefaultNow();
+			if (registry == null) {
+				throw new IllegalStateException("micrometer.registries.empty");
+			}
+			nbRequestsCounter = Counter.builder("pg.persistor.queries")
+				.description("number of queries executed by pg persistor")
+				.register(registry);
+			executionTime = Timer.builder("pg.persistor.exec.time")
+				.description("blocking between invocation and execution")
+				.publishPercentileHistogram()
+				.maximumExpectedValue(Duration.ofSeconds(1L))
+				.register(registry);
+		} catch(Exception e) {
+			logger.error("Error while starting mod postgres", e);
 		}
-
-		HikariConfig conf = new HikariConfig();
-		conf.setJdbcUrl(url);
-		conf.setUsername(config.getString("username", "postgres"));
-		conf.setPassword(config.getString("password", ""));
-		conf.setMaximumPoolSize(config.getInteger("pool_size", 10));
-		conf.addDataSourceProperty("cachePrepStmts", "true");
-		conf.addDataSourceProperty("prepStmtCacheSize", "250");
-		conf.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-		conf.addDataSourceProperty("useServerPrepStmts", "true");
-		ds = new HikariDataSource(conf);
-
-		if (isNotEmpty(urlSlave)) {
-			HikariConfig confSlave = new HikariConfig();
-			confSlave.setJdbcUrl(urlSlave);
-			confSlave.setUsername(config.getString("username", "postgres"));
-			confSlave.setPassword(config.getString("password", ""));
-			confSlave.setMaximumPoolSize(config.getInteger("pool_size", 10));
-			confSlave.addDataSourceProperty("cachePrepStmts", "true");
-			confSlave.addDataSourceProperty("prepStmtCacheSize", "250");
-			confSlave.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-			confSlave.addDataSourceProperty("useServerPrepStmts", "true");
-			dsSlave = new HikariDataSource(confSlave);
-		}
-
-		vertx.eventBus().consumer(config.getString("address", "sql.persistor"), this);
-		startPromise.tryComplete();
-
-		final MeterRegistry registry = BackendRegistries.getDefaultNow();
-		if (registry == null) {
-			throw new IllegalStateException("micrometer.registries.empty");
-		}
-		nbRequestsCounter = Counter.builder("pg.persistor.queries")
-			.description("number of queries executed by pg persistor")
-			.register(registry);
-		delayInBlocking = Timer.builder("pg.persistor.delay.blocking")
-			.description("blocking between invocation and execution")
-			.publishPercentileHistogram()
-			.maximumExpectedValue(Duration.ofSeconds(3L))
-			.register(registry);
-		executionTime = Timer.builder("pg.persistor.exec.time")
-			.description("blocking between invocation and execution")
-			.publishPercentileHistogram()
-			.maximumExpectedValue(Duration.ofSeconds(1L))
-			.register(registry);
 	}
 
 	@Override
 	public void stop() throws Exception {
 		super.stop();
-		if (ds != null) {
-			ds.close();
+		if (primaryPool != null) {
+			primaryPool.close();
+		}
+		if(secondaryPool != null) {
+			secondaryPool.close();
 		}
 	}
 
@@ -129,73 +141,65 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 	public void handle(Message<JsonObject> message) {
 		final long start = currentTimeMillis();
 		nbRequestsCounter.increment();
-		vertx.executeBlocking(() -> {
-			delayInBlocking.record(currentTimeMillis() - start, TimeUnit.MILLISECONDS);
-			logger.info("Executing on " + Thread.currentThread().getName());
-			String action = message.body().getString("action", "");
-			final long startQ = currentTimeMillis();
-			switch (action) {
-				case "select" :
-					doSelect(message);
-					break;
-				case "insert" :
-					doInsert(message);
-					break;
-				case "prepared" :
-					doPrepared(message);
-					break;
-				case "transaction" :
-					doTransaction(message);
-					break;
-				case "raw" :
-					doRaw(message);
-					break;
-				case "upsert" :
-					doUpsert(message);
-					break;
-				default :
-					sendError(message, "invalid.action");
-			}
-			executionTime.record(currentTimeMillis() - startQ, TimeUnit.MILLISECONDS);
-			return null;
-		}, false);
-	}
-
-	private void doRaw(Message<JsonObject> message) {
-		Connection connection = null;
-		try {
-			final String query = message.body().getString("command");
-			if (dsSlave != null && query != null) {
-				final Matcher m = writingClausesPattern.matcher(query);
-				if (!m.find()) {
-					connection = dsSlave.getConnection();
-				}
-			}
-			if (connection == null) {
-				connection = ds.getConnection();
-			}
-
-			JsonObject result = raw(message.body(), connection);
-			if (result != null) {
-				sendOK(message, result);
-			} else {
-				sendError(message, "invalid.query");
-			}
-		} catch (SQLException e) {
-			sendError(message, e.getMessage(), e);
-		} finally {
-			if (connection != null) {
-				try {
-					connection.close();
-				} catch (SQLException e) {
-					logger.error(e.getMessage(), e);
-				}
-			}
+		String action = message.body().getString("action", "");
+		final long startQ = currentTimeMillis();
+		switch (action) {
+			case "select" :
+				doSelect(message);
+				break;
+			case "insert" :
+				doInsert(message);
+				break;
+			case "prepared" :
+				doPrepared(message);
+				break;
+			case "transaction" :
+				doTransaction(message);
+				break;
+			case "raw" :
+				doRaw(message);
+				break;
+			case "upsert" :
+				doUpsert(message);
+				break;
+			default :
+				sendError(message, "invalid.action");
 		}
+		executionTime.record(currentTimeMillis() - startQ, TimeUnit.MILLISECONDS);
+	}
+
+	private Future<JsonObject> doRaw(Message<JsonObject> message) {
+		final Future<SqlConnection> connection;
+		final String query = message.body().getString("command");
+		if (secondaryPool != null && query != null) {
+			final Matcher m = writingClausesPattern.matcher(query);
+			if (!m.find()) {
+				connection = secondaryPool.getConnection();
+			} else {
+				connection = primaryPool.getConnection();
+			}
+		} else {
+			connection = primaryPool.getConnection();
+		}
+		return connection
+			.compose(conn -> raw(message.body(), conn))
+			.onSuccess(result -> {
+				if(result != null) {
+					sendOK(message, result);
+				} else {
+					sendError(message, "invalid.query");
+				}
+			})
+			.onFailure(th -> sendError(message, th))
+			.onComplete(e -> {
+				if(connection.succeeded()) {
+					connection.result().close().onFailure(th -> logger.error("Error while closing connection", th));
+				}
+			});
 	}
 
 
-	private JsonObject raw(JsonObject json, Connection connection) throws SQLException {
+	private Future<JsonObject> raw(JsonObject json, SqlConnection connection) {
 		String query = json.getString("command");
 		if (query == null || query.isEmpty()) {
 			return null;
@@ -203,149 +207,191 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 		return raw(query, connection);
 	}
 
-	private JsonObject raw(String query, Connection connection) throws SQLException {
-		Statement statement = null;
-		ResultSet resultSet = null;
-		if (logger.isDebugEnabled()) {
-			logger.debug("query : " + query);
-		}
-		try {
-			statement = connection.createStatement();
-			JsonObject r;
-			if (statement.execute(query)) {
-				resultSet = statement.getResultSet();
-				r = buildResults(resultSet);
-			} else {
-				r = buildResults(statement.getUpdateCount());
-			}
-			if (logger.isDebugEnabled()) {
-				logger.debug(r.encodePrettily());
-			}
-			return r;
-		} finally {
-			if (resultSet != null) {
-				resultSet.close();
-			}
-			if (statement != null) {
-				statement.close();
-			}
-		}
+	private Future<JsonObject> raw(String query, SqlConnection connection) {
+		return connection.query(query).execute()
+			.compose(result -> {
+				JsonObject response;
+				if (result.size() > 0) {
+					response = buildResults(result); // Handle result rows
+				} else {
+					response = buildResults(result.rowCount()); // Handle update count
+				}
+				if (logger.isDebugEnabled()) {
+					logger.debug(response.encodePrettily());
+				}
+				return Future.succeededFuture(response);
+			})
+			.onFailure(err -> logger.error("Error while executing query : " + query, err));
 	}
 
-	private JsonObject raw(String query) throws SQLException {
+	private Future<JsonObject> raw(String query) {
 		return raw(query, false);
 	}
 
-	private JsonObject raw(String query, boolean checkReadOnly) throws SQLException {
-		Connection connection = null;
-		try {
-			if (checkReadOnly && dsSlave != null && query != null) {
-				final Matcher m = writingClausesPattern.matcher(query);
-				if (!m.find()) {
-					connection = dsSlave.getConnection();
-				}
+	private Future<JsonObject> raw(String query, boolean checkReadOnly) {
+		final Future<SqlConnection> connection;
+		if (checkReadOnly && secondaryPool != null && query != null) {
+			final Matcher m = writingClausesPattern.matcher(query);
+			if (!m.find()) {
+				connection = secondaryPool.getConnection();
+			} else {
+				connection = primaryPool.getConnection();
 			}
-			if (connection == null) {
-				connection = ds.getConnection();
-			}
-			return raw(query, connection);
-		} finally {
-			if (connection != null) {
-				connection.close();
-			}
+		} else  {
+			connection = primaryPool.getConnection();
 		}
+		return connection.flatMap(conn -> raw(query, conn));
 	}
 
 	private void doTransaction(Message<JsonObject> message) {
 		JsonArray statements = message.body().getJsonArray("statements");
-		if (statements == null || statements.size() == 0) {
+		if (statements == null || statements.isEmpty()) {
 			sendError(message, "missing.statements");
 			return;
 		}
 		if (logger.isDebugEnabled()) {
 			logger.debug("TRANSACTION-JSON: " + statements.encodePrettily());
 		}
-		Connection connection = null;
-		try {
-			connection = ds.getConnection();
-			connection.setAutoCommit(false);
-			JsonArray results = new JsonArray();
-			for (Object s : statements) {
-				if (!(s instanceof JsonObject)) continue;
-				JsonObject json = (JsonObject) s;
-				String action = json.getString("action", "");
-				try {
-					switch (action) {
-						case "insert":
-							results.add(raw(insertQuery(json), connection));
-							break;
-						case "select":
-							results.add(raw(selectQuery(json), connection));
-							break;
-						case "raw":
-							results.add(raw(json, connection));
-							break;
-						case "prepared":
-							results.add(prepared(json, connection));
-							break;
-						case "upsert":
-							results.add(raw(upsertQuery(json), connection));
-							break;
-						default:
-							connection.rollback();
-							throw new IllegalArgumentException("invalid.action");
+		primaryPool.getConnection().onFailure(th -> sendError(message, th))
+			.flatMap(connection  -> connection.begin().map(tx -> Pair.of(connection, tx)))
+			.onSuccess(pair -> {
+				final SqlConnection conn = pair.getKey();
+				final Transaction tx = pair.getValue();
+				executeStatements(statements, conn, 0).onSuccess(results -> {
+					tx.commit()
+						.onSuccess(e -> sendOK(message, new JsonObject().put("results", results)))
+						.onFailure(th -> sendError(message, th));
+				})
+				.onFailure(th -> sendError(message, th))
+				.onComplete(e -> {
+					if (conn != null) {
+						conn.close().onFailure(th -> logger.error("Error while closing connection after transaction", th));
 					}
-				} catch (Exception e) {
-					logger.error("An error occurred while executing " + json.encodePrettily(), e);
-					throw e;
-				}
-			}
-			connection.commit();
-			sendOK(message, new JsonObject().put("results", results));
-		} catch (Exception e) {
-			sendError(message, e.getMessage(), e);
-		} finally {
-			if (connection != null) {
-				try {
-					connection.close();
-				} catch (SQLException e) {
-					logger.error(e.getMessage(), e);
-				}
-			}
-		}
+				})
+				.onFailure(th -> sendError(message, th));
+		});
 	}
 
-	private void doPrepared(Message<JsonObject> message) {
-		Connection connection = null;
-		try {
-			final String query = message.body().getString("statement");
-			if (dsSlave != null && isNotEmpty(query)) {
-				final Matcher m = writingClausesPattern.matcher(query);
-				if (!m.find()) {
-					connection = dsSlave.getConnection();
-				}
-			}
-			if (connection == null) {
-				connection = ds.getConnection();
-			}
+	private Future<JsonArray> executeStatements(final JsonArray statements, final SqlConnection connection, final int pos) {
+		if(pos >= statements.size()) {
+			return Future.succeededFuture(new JsonArray());
+		}
+		Object s = statements.getValue(pos);
+		if (!(s instanceof JsonObject)) return executeStatements(statements, connection, pos + 1);
+		JsonObject json = (JsonObject) s;
+		String action = json.getString("action", "");
+		Future<JsonObject> executor;
+		switch (action) {
+			case "insert":
+				executor = raw(insertQuery(json), connection);
+				break;
+			case "select":
+				executor = raw(selectQuery(json), connection);
+				break;
+			case "raw":
+				executor = raw(json, connection);
+				break;
+			case "prepared":
+				executor = prepared(json, connection);
+				break;
+			case "upsert":
+				executor = raw(upsertQuery(json), connection);
+				break;
+			default:
+				executor = Future.failedFuture("invalid.action");
+		}
+		return executor.flatMap(result -> {
+			return executeStatements(statements, connection, pos + 1).map(results -> {
+				return results.add(0, result);
+			});
+		});
+	}
 
-			JsonObject result = prepared(message.body(), connection);
-			if (result != null) {
-				sendOK(message, result);
+	private Future<Void> doPrepared(Message<JsonObject> message) {
+		final Future<SqlConnection> connection;
+		final String query = message.body().getString("statement");
+		if (secondaryPool != null && isNotEmpty(query)) {
+			final Matcher m = writingClausesPattern.matcher(query);
+			if (!m.find()) {
+				connection = secondaryPool.getConnection();
 			} else {
-				sendError(message, "invalid.query");
+				connection = primaryPool.getConnection();
 			}
-		} catch (SQLException e) {
-			sendError(message, e.getMessage(), e);
-		} finally {
-			if (connection != null) {
-				try {
-					connection.close();
-				} catch (SQLException e) {
-					logger.error(e.getMessage(), e);
+		} else {
+			connection = primaryPool.getConnection();
+		}
+		return connection.compose(conn -> prepared(message.body(), conn))
+			.onSuccess(result -> {
+				if (result != null) {
+					sendOK(message, result);
+				} else {
+					logger.error("The query was found to be invalid : " + query);
+					sendError(message, "invalid.query");
 				}
+			})
+			.onFailure(th -> sendError(message, th))
+			.onComplete(e -> {
+				if(connection.succeeded()) {
+					connection.result().close();
+				}
+			})
+			.mapEmpty();
+	}
+
+	private Future<JsonObject> prepared(final JsonObject json, SqlConnection connection) {
+		String query = json.getString("statement");
+		JsonArray values = json.getJsonArray("values");
+		if (query == null || query.isEmpty() || values == null) {
+			return Future.failedFuture("Invalid query or values");
+		}
+
+		if (logger.isDebugEnabled()) {
+			logger.debug("query : " + query + " - values : " + values.encode());
+		}
+
+		Tuple tuple = Tuple.tuple();
+		for (int i = 0; i < values.size(); i++) {
+			Object val = values.getValue(i);
+			if(val instanceof Integer) {
+				tuple.addInteger((Integer) val);
+			} else {
+				tuple.addValue(val);
 			}
 		}
+
+		return connection.preparedQuery(convertJdbcPlaceholdersToPgSql(query)).execute(tuple)
+			.map(resultSet -> {
+				JsonObject result;
+				if (resultSet.size() > 0) {
+					result = buildResults(resultSet);
+				} else {
+					result = buildResults(resultSet.rowCount());
+				}
+				if (logger.isDebugEnabled()) {
+					logger.debug(result.encodePrettily());
+				}
+				return result;
+			}).onFailure(th -> {
+				logger.error("Error while executing query : " + query, th);
+			})
+			.onComplete(e -> {
+				connection.close().onFailure(th -> log.warn("Could not close connection after prepared", th));
+			});
+	}
+
+	private String convertJdbcPlaceholdersToPgSql(String query) {
+		int counter = 1;
+		StringBuilder convertedQuery = new StringBuilder();
+
+		for (int i = 0; i < query.length(); i++) {
+			if (query.charAt(i) == '?') {
+				convertedQuery.append('$').append(counter++);
+			} else {
+				convertedQuery.append(query.charAt(i));
+			}
+		}
+
+		return convertedQuery.toString();
 	}
 
 	private JsonObject prepared(JsonObject json, Connection connection) throws SQLException {
@@ -401,11 +447,9 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			sendError(message, "invalid.query");
 			return;
 		}
-		try {
-			sendOK(message, raw(query));
-		} catch (SQLException e) {
-			sendError(message, e.getMessage(), e);
-		}
+			raw(query)
+				.onSuccess(result -> sendOK(message, result))
+				.onFailure(th -> sendError(message, "Error while doing insert", th));
 	}
 
 	private void doUpsert(Message<JsonObject> message) {
@@ -415,11 +459,9 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			sendError(message, "invalid.query");
 			return;
 		}
-		try {
-			sendOK(message, raw(query));
-		} catch (SQLException e) {
-			sendError(message, e.getMessage(), e);
-		}
+		raw(query)
+			.onSuccess(result -> sendOK(message, result))
+			.onFailure(th -> sendError(message, "Error while doing upsert", th));
 	}
 
 	private String insertQuery(JsonObject json) {
@@ -518,11 +560,9 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			sendError(message, "invalid.query");
 			return;
 		}
-		try {
-			sendOK(message, raw(query, true));
-		} catch (SQLException e) {
-			sendError(message, e.getMessage(), e);
-		}
+			raw(query, true)
+				.onSuccess(result -> sendOK(message, result))
+				.onFailure(th -> sendError(message, "Error while doing select", th));
 	}
 
 	private String selectQuery(JsonObject json) {
@@ -556,6 +596,70 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 		result.put("results", results);
 		result.put("rows", rows);
 		return result;
+	}
+
+	private void transformResultSet(JsonArray results, RowSet<Row> rs) {
+		rs.forEach(row -> {
+			JsonArray rowJson = new JsonArray();
+			results.add(rowJson);
+			final List<ColumnDescriptor> columnDescriptors = rs.columnDescriptors();
+			// Process each column in the row
+			int i = 0;
+			for (ColumnDescriptor columnDescriptor : columnDescriptors) {
+				final String columnName = columnDescriptor.name();
+				Object value = row.getValue(i);
+				switch (columnDescriptor.jdbcType()) {
+					case NULL:
+						rowJson.addNull();
+						break;
+					case ARRAY:
+						if(value == null) {
+							rowJson.addNull();
+						} else {
+							final JsonArray jsonArray = new JsonArray();
+							// TODO implement
+							rowJson.add(jsonArray);
+						}
+						break;
+					case DATE:
+						if (value instanceof java.time.LocalDate) {
+							rowJson.add(value.toString());
+						}
+						break;
+					case TIMESTAMP:
+						if (value instanceof java.time.LocalDateTime) {
+							java.time.format.DateTimeFormatter formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
+							rowJson.add(((java.time.LocalDateTime) value).format(formatter));
+						}
+						break;
+					case BIGINT:
+					case INTEGER:
+					case SMALLINT:
+					case TINYINT:
+						rowJson.add(((Number) value).longValue());
+						break;
+					case REAL:
+					case DOUBLE:
+					case FLOAT:
+						rowJson.add(((Number) value).doubleValue());
+						break;
+					case BOOLEAN:
+						rowJson.add((Boolean) value);
+						break;
+					case VARCHAR:
+					case CHAR:
+						rowJson.add(value.toString());
+						break;
+					case BLOB:
+						rowJson.add(value.toString()); // Adjust if binary data handling is required
+						break;
+					default:
+						log.warn("Unhandled type " + columnDescriptor.jdbcType());
+						rowJson.add(value.toString()); // Fallback for other types
+				}
+				i++;
+			}
+		});
 	}
 
 	private void transformResultSet(JsonArray results, ResultSet rs) throws SQLException{
@@ -660,6 +764,27 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 			}
 		}
 	}
+	private JsonObject buildResults(RowSet<Row> rowSet) {
+		JsonObject result = new JsonObject();
+		result.put("status", "ok");
+		result.put("message", "");
+
+		JsonArray fields = new JsonArray();
+		JsonArray results = new JsonArray();
+		result.put("fields", fields);
+		result.put("results", results);
+
+		// Extract column names
+		if (rowSet.columnsNames() != null) {
+			rowSet.columnsNames().forEach(fields::add);
+		}
+
+		transformResultSet(results, rowSet);
+
+		result.put("rows", results.size());
+		return result;
+	}
+
 
 	private JsonObject buildResults(ResultSet rs) throws SQLException {
 		JsonObject result = new JsonObject();
