@@ -85,7 +85,8 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 
 			// Configure connection pool
 			PoolOptions primaryPoolOptions = new PoolOptions()
-				.setMaxSize(maxPoolSize);
+				.setMaxSize(maxPoolSize)
+				.setName("pg-primary-pool");
 
 			// Initialize primary pool
 			primaryPool = Pool.pool(vertx, primaryConnectOptions, primaryPoolOptions);
@@ -96,11 +97,12 @@ public class SqlPersistor extends BusModBase implements Handler<Message<JsonObje
 					.setUser(username)
 					.setPassword(password)
 					//.addProperty("stringtype", "unspecified") // Query parameter
-					.setSslMode(SslMode.REQUIRE); ;
+					.setSslMode(SslMode.REQUIRE);
 
 				// Configure secondary pool
 				PoolOptions secondaryPoolOptions = new PoolOptions()
-					.setMaxSize(maxPoolSize);
+					.setMaxSize(maxPoolSize)
+					.setName("pg-secondary-pool");
 
 				// Initialize secondary pool
 				secondaryPool = Pool.pool(vertx, secondaryConnectOptions, secondaryPoolOptions);
